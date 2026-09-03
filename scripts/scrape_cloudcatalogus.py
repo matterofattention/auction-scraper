@@ -12,6 +12,7 @@ Data/GetSessions.
 
 import csv
 import time
+from collections import Counter
 
 import requests
 
@@ -72,7 +73,18 @@ def scrape_session(base_url, auct_session_id, session_name):
     return lots
 
 
-def scrape_all(base_url, output_csv):
+def auction_month_year(lots):
+    """Most common "YYYY-MM" among lots' `datum` (session start) field.
+
+    A catalogue's sessions can close in different months (e.g. a "TIMED
+    ONLINE" session closing a month before the main live sessions), so
+    this picks the month/year shared by most lots as the catalogue's date.
+    """
+    months = [lot["datum"][:7] for lot in lots if lot.get("datum")]
+    return Counter(months).most_common(1)[0][0]
+
+
+def scrape_all(base_url, output_dir, filename_prefix):
     sessions = get_sessions(base_url)
     print(f"Found {len(sessions)} sessions: "
           f"{[(s['ID'], s['Name']) for s in sessions]}")
@@ -95,10 +107,12 @@ def scrape_all(base_url, output_csv):
             if key not in fieldnames:
                 fieldnames.append(key)
 
+    output_csv = f"{output_dir}/{filename_prefix}_{auction_month_year(all_lots)}.csv"
+
     with open(output_csv, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(all_lots)
 
     print(f"Wrote {len(all_lots)} lots to {output_csv}")
-    return all_lots
+    return output_csv, all_lots
