@@ -15,8 +15,8 @@ for lots).
 
 import csv
 import json
+import re
 import time
-from collections import Counter
 from email.utils import parsedate_to_datetime
 
 import requests
@@ -24,6 +24,14 @@ import requests
 API_BASE = "https://webapp.artisio.co"
 PAGE_SIZE = 100
 REQUEST_DELAY_SECONDS = 0.5
+
+LOT_FIELDNAMES = [
+    "LotUUID", "LotNo", "StockNo", "AuctionUUID", "AuctionNo", "AuctionTitle",
+    "Category", "Title", "ShortDescription", "Description", "Status", "Currency",
+    "LowEstimate", "HighEstimate", "StartPrice", "Reserve", "BuyNowPrice",
+    "Quantity", "NumOfBids", "LastBidAmount", "WinningBidAmount", "IsStarted",
+    "StartDate", "EndDate", "ImageURLs", "NrOfImages", "DynamicFields",
+]
 
 session = requests.Session()
 
@@ -136,27 +144,27 @@ def flatten_lot(lot, lang):
     }
 
 
-def auction_month_year(lots):
-    """Most common "YYYY-MM" among lots' `EndDate` field.
+def _slugify(text):
+    slug = re.sub(r"[^\w]+", "-", text.strip().lower()).strip("-")
+    return slug or "untitled"
 
-    An auction house can have several auctions closing in different
-    months at once, so this picks the month/year shared by most lots as
-    the catalogue's date (mirrors scrape_cloudcatalogus.auction_month_year).
-    """
-    months = []
-    for lot in lots:
-        end_date = lot.get("EndDate")
-        if not end_date:
+
+def _auction_month_year(auction):
+    """"YYYY-MM" the auction closes in, falling back to when it opens."""
+    for key in ("end_date", "start_date"):
+        raw = auction.get(key)
+        if not raw:
             continue
         try:
-            dt = parsedate_to_datetime(end_date)
+            dt = parsedate_to_datetime(raw)
         except (TypeError, ValueError):
             continue
-        months.append(f"{dt.year:04d}-{dt.month:02d}")
-    return Counter(months).most_common(1)[0][0]
+        return f"{dt.year:04d}-{dt.month:02d}"
+    return "unknown-date"
 
 
 def scrape_all(site_origin, client_id, output_dir, filename_prefix, lang="nl", status="published"):
+    """Scrape each auction into its own CSV, named by auction title and month/year."""
     print(f"Fetching {status} auctions from {site_origin}...")
     auctions = get_auctions(site_origin, client_id, status=status)
     print(
@@ -164,7 +172,7 @@ def scrape_all(site_origin, client_id, output_dir, filename_prefix, lang="nl", s
         f"{[(a['auction_no'], _localized(a['title'], lang)) for a in auctions]}"
     )
 
-    all_lots = []
+    written = []
     for auction in auctions:
         auction_uuid = auction["uuid"]
         auction_no = auction["auction_no"]
@@ -173,23 +181,19 @@ def scrape_all(site_origin, client_id, output_dir, filename_prefix, lang="nl", s
         lots = get_lots(site_origin, client_id, auction_uuid, f"{auction_no} {title}")
         flattened = [flatten_lot(lot, lang) for lot in lots]
         print(f"  -> collected {len(flattened)} lots")
-        all_lots.extend(flattened)
+
+        month_year = _auction_month_year(auction)
+        output_csv = f"{output_dir}/{filename_prefix}_{month_year}_{_slugify(title)}.csv"
+
+        with open(output_csv, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=LOT_FIELDNAMES)
+            writer.writeheader()
+            writer.writerows(flattened)
+
+        print(f"  -> wrote {len(flattened)} lots to {output_csv}")
+        written.append((output_csv, flattened))
         time.sleep(REQUEST_DELAY_SECONDS)
 
-    print(f"Total lots collected across all auctions: {len(all_lots)}")
-
-    fieldnames = []
-    for lot in all_lots:
-        for key in lot.keys():
-            if key not in fieldnames:
-                fieldnames.append(key)
-
-    output_csv = f"{output_dir}/{filename_prefix}_{auction_month_year(all_lots)}.csv"
-
-    with open(output_csv, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(all_lots)
-
-    print(f"Wrote {len(all_lots)} lots to {output_csv}")
-    return output_csv, all_lots
+    total_lots = sum(len(lots) for _, lots in written)
+    print(f"Total lots collected across {len(written)} auctions: {total_lots}")
+    return written
